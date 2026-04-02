@@ -1,0 +1,28 @@
+# .gitignore для Miku OS
+
+# Файлы сборки
+build/
+*.bin
+*.iso
+*.o
+*.elf
+
+# Временные файлы
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Логи
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Тестовые образы
+test_images/
+
+# Документация генерируемая
+docs/_build/
