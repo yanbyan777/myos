@@ -1,6 +1,53 @@
+```
+# Build artifacts
+build/
+dist/
 *.o
-*.bin
-*.iso
-isodir/
-disk.img
-*.swp
+*.obj
+*.out
+
+# Dependencies
+node_modules/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Editors
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Compiled files
+*.exe
+*.dll
+*.so
+*.a
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Testing and coverage
+.coverage
+coverage/
+htmlcov/
+
+# Gradle
+.gradle/
+target/
+
+# Virtual environments
+.venv/
+venv/
+```
