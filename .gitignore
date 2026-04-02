@@ -1,0 +1,20 @@
+# Build files
+*.o
+*.bin
+*.iso
+
+# Temporary
+isodir/
+
+# Disk image (большой файл)
+disk.img
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
