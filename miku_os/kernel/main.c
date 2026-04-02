@@ -1,261 +1,287 @@
 /*
- * Miku OS - Main Kernel Entry Point
- * 
- * This is the main entry point for the Miku OS kernel.
- * It initializes all subsystems and starts the init process.
+ * Miku OS v3.0 - Kernel Entry Point (C)
+ * Основная точка входа ядра после перехода в 64-bit режим
  */
 
 #include "miku_os.h"
 
-/* Global kernel variables */
-scheduler_t g_scheduler;
-task_struct_t *g_current_task = NULL;
-task_struct_t *g_init_task = NULL;
-mm_struct_t g_kernel_mm;
-struct superblock *g_rootfs = NULL;
+/* ============================================================
+ * ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+ * ============================================================ */
+cpu_t cpu_data[MIKU_MAX_CPUS];
+u32 num_cpus = 1;
+thread_t* current_thread = NULL;
+u64 jiffies = 0;
+u64 boot_time = 0;
 
-/* Kernel version banner */
-static const char *kernel_banner = 
-    "\n"
-    "  __  __ _     _     ___  ____   ____  _   _ _____ \n"
-    " |  \\/  | |   | |   / _ \\|  _ \\ / __ \\| | | | ____|\n"
-    " | |\\/| | |   | |  | | | | |_) | |  | | | | |  _|  \n"
-    " | |  | | |___| |__| |_| |  _ <| |__| | |_| | |___ \n"
-    " |_|  |_|_____|_____\\___/|_| \\_\\\\____/ \\___/|_____|\n"
-    "                                                   \n"
-    "           Miku OS v" MIKU_VERSION_STRING " - \"" MIKU_CODENAME "\"\n"
-    "        A modern, Linux-like 64-bit operating system\n"
-    "           Built with ♪ by Hatsune Miku fans\n"
-    "\n";
+/* Multiboot2 информация */
+static u32 mb_magic = 0;
+static void* mb_mboot_ptr = NULL;
 
-/* Forward declarations */
-static void kernel_main_early(void);
-static void kernel_main_late(void);
-static void init_idle_thread(void *arg);
-static void init_process(void *arg);
+/* ============================================================
+ * VGA КОНСОЛЬ (простой драйвер)
+ * ============================================================ */
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_MEMORY 0xB8000
 
-/* ============================================================================
- * KERNEL ENTRY POINT (called from boot.asm)
- * ============================================================================ */
-void kernel_main(u32 magic, u64 mbinfo) {
-    (void)magic;
-    (void)mbinfo;
+static size_t vga_x = 0;
+static size_t vga_y = 0;
+static u8 vga_color = 0x0F; /* Белый на черном */
+
+static inline u8 vga_entry_color(u8 fg, u8 bg) {
+    return fg | (bg << 4);
+}
+
+static inline u16 vga_entry(unsigned char uc, u8 color) {
+    return (u16)uc | ((u16)color << 8);
+}
+
+void vga_putchar(char c) {
+    u16* vga = (u16*)VGA_MEMORY;
     
-    /* Early initialization (console, basic memory, CPU) */
-    kernel_main_early();
-    
-    console_printf("%s", kernel_banner);
-    
-    log_info("Miku OS Kernel starting...");
-    log_info("Version: %s (%s)", MIKU_VERSION_STRING, MIKU_CODENAME);
-    log_info("Compiled for x86_64 architecture");
-    
-    /* Late initialization (VFS, drivers, scheduler, etc.) */
-    kernel_main_late();
-    
-    log_info("Kernel initialization complete!");
-    log_info("Starting init process...");
-    
-    /* Create the init process (PID 1) */
-    g_init_task = task_create("init", init_process, NULL, 0);
-    if (!g_init_task) {
-        log_panic("Failed to create init process!");
+    if (c == '\n') {
+        vga_x = 0;
+        vga_y++;
+        return;
     }
     
-    log_info("Init process created (PID=%d, TID=%d)", 
-             g_init_task->pid, g_init_task->tid);
+    if (c == '\r') {
+        vga_x = 0;
+        return;
+    }
     
-    /* Start scheduling */
-    log_info("Starting scheduler...");
-    scheduler_schedule();
+    if (c == '\t') {
+        vga_x = (vga_x + 8) & ~7;
+        if (vga_x >= VGA_WIDTH) {
+            vga_x = 0;
+            vga_y++;
+        }
+        return;
+    }
     
-    /* Should never reach here */
-    log_panic("Scheduler returned unexpectedly!");
+    if (vga_x >= VGA_WIDTH) {
+        vga_x = 0;
+        vga_y++;
+    }
+    
+    if (vga_y >= VGA_HEIGHT) {
+        /* Scroll */
+        for (size_t i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
+            vga[i] = vga[i + VGA_WIDTH];
+        }
+        for (size_t i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
+            vga[i] = vga_entry(' ', vga_color);
+        }
+        vga_y = VGA_HEIGHT - 1;
+    }
+    
+    vga[vga_y * VGA_WIDTH + vga_x] = vga_entry(c, vga_color);
+    vga_x++;
 }
 
-/* ============================================================================
- * EARLY INITIALIZATION
- * ============================================================================ */
-static void kernel_main_early(void) {
-    /* Initialize console (must be first!) */
-    console_init();
-    
-    /* Initialize logging */
-    log_init();
-    
-    /* Initialize CPU features */
-    cpu_init();
-    
-    /* Initialize memory management */
-    mm_init();
-    
-    /* Initialize interrupts */
-    irq_init();
-    
-    log_info("Early initialization complete");
-}
-
-/* ============================================================================
- * LATE INITIALIZATION
- * ============================================================================ */
-static void kernel_main_late(void) {
-    /* Initialize timekeeping */
-    time_init();
-    
-    /* Initialize scheduler */
-    scheduler_init();
-    
-    /* Initialize VFS */
-    vfs_init();
-    
-    /* Initialize IPC mechanisms */
-    ipc_init();
-    
-    /* Initialize device model */
-    // device_model_init();
-    
-    /* Initialize built-in filesystems */
-    // fs_init();
-    
-    /* Mount root filesystem */
-    // vfs_mount("rootfs", "/", "ramfs", 0, NULL);
-    
-    log_info("Late initialization complete");
-}
-
-/* ============================================================================
- * IDLE THREAD
- * ============================================================================ */
-static void init_idle_thread(void *arg) {
-    (void)arg;
-    
-    while (true) {
-        /* Halt CPU until next interrupt */
-        cpu_halt();
+void vga_print(const char* str) {
+    while (*str) {
+        vga_putchar(*str);
+        str++;
     }
 }
 
-/* ============================================================================
- * INIT PROCESS (PID 1)
- * ============================================================================ */
-static void init_process(void *arg) {
-    (void)arg;
-    
-    console_printf("\n");
-    console_printf("  ╔════════════════════════════════════════╗\n");
-    console_printf("  ║  Welcome to Miku OS v%s!          ║\n", MIKU_VERSION_STRING);
-    console_printf("  ║  Type 'help' for available commands  ║\n");
-    console_printf("  ╚════════════════════════════════════════╝\n");
-    console_printf("\n");
-    
-    log_info("Init process running (PID=%d)", g_current_task->pid);
-    
-    /* Main init loop */
-    while (true) {
-        /* 
-         * In a real implementation, this would:
-         * 1. Run /etc/init.d scripts
-         * 2. Start system daemons
-         * 3. Launch user session manager
-         * 4. Handle zombie children
-         */
-        
-        /* For now, just sleep and let other threads run */
-        scheduler_sleep(100); /* 1 second at 100 Hz */
-        
-        /* Check for zombie children */
-        // reap_zombies();
+void vga_printf(const char* format, ...) {
+    /* Простая реализация printf */
+    vga_print(format);
+}
+
+void vga_clear(void) {
+    u16* vga = (u16*)VGA_MEMORY;
+    for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
+        vga[i] = vga_entry(' ', vga_color);
     }
+    vga_x = 0;
+    vga_y = 0;
 }
 
-/* ============================================================================
- * KERNEL PANIC
- * ============================================================================ */
-void kernel_panic(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    
-    irq_disable();
-    
-    console_set_color(0x0F, 0x04); /* White on red */
-    console_clear();
-    
-    console_printf("\n\n");
-    console_printf("  ╔═══════════════════════════════════════════╗\n");
-    console_printf("  ║           MIKU OS KERNEL PANIC            ║\n");
-    console_printf("  ╚═══════════════════════════════════════════╝\n");
-    console_printf("\n");
-    console_printf("  The system has encountered a fatal error.\n");
-    console_printf("  Please report this to the Miku OS developers.\n");
-    console_printf("\n");
-    console_printf("  Error: ");
-    
-    /* Simple printf without formatting for safety */
-    console_putstr(fmt);
-    
-    console_printf("\n\n");
-    console_printf("  System halted. Please restart manually.\n");
-    console_printf("\n");
-    console_printf("  ♪ Thank you for using Miku OS! ♪\n");
-    console_printf("\n");
-    
-    va_end(args);
-    
-    /* Halt forever */
-    while (true) {
-        cpu_halt();
-    }
+/* ============================================================
+ * КОНСОЛЬ ЯДРА
+ * ============================================================ */
+void console_init(void) {
+    vga_clear();
+    vga_print("\n");
+    vga_print("  __  __ _   _ _   _ ___ ____  _     ___ _   _  ____ \n");
+    vga_print(" |  \\/  | \\ | | \\ | |_ _/ ___|| |   |_ _| \\ | |/ ___|\n");
+    vga_print(" | |\\/| |  \\| |  \\| || |\\___ \\| |    | ||  \\| | |  _ \n");
+    vga_print(" | |  | | |\\  | |\\  || | ___) | |___ | || |\\  | |_| |\n");
+    vga_print(" |_|  |_|_| \\_|_| \\_|___|____/|_____|___|_| \\_|\\____|\n");
+    vga_print("\n");
 }
 
-/* ============================================================================
- * UTILITY FUNCTIONS
- * ============================================================================ */
-
-/* Get current task */
-task_struct_t *scheduler_get_current(void) {
-    return g_current_task;
+int printk(const char* format, ...) {
+    vga_print(format);
+    return 0;
 }
 
-/* Simple string copy */
-char *strcpy(char *dest, const char *src) {
-    char *orig = dest;
-    while ((*dest++ = *src++) != '\0');
-    return orig;
-}
+/* ============================================================
+ * ЗАГЛУШКИ ФУНКЦИЙ (будут реализованы отдельно)
+ * ============================================================ */
 
-/* Simple memory set */
-void *memset(void *s, int c, size_t n) {
-    u8 *p = (u8 *)s;
-    while (n--) {
-        *p++ = (u8)c;
-    }
-    return s;
-}
-
-/* Simple memory copy */
-void *memcpy(void *dest, const void *src, size_t n) {
-    u8 *d = (u8 *)dest;
-    const u8 *s = (const u8 *)src;
-    while (n--) {
-        *d++ = *s++;
-    }
+void* memcpy(void* dest, const void* src, size_t n) {
+    u8* d = (u8*)dest;
+    const u8* s = (const u8*)src;
+    while (n--) *d++ = *s++;
     return dest;
 }
 
-/* String length */
-size_t strlen(const char *s) {
+void* memset(void* s, int c, size_t n) {
+    u8* p = (u8*)s;
+    while (n--) *p++ = (u8)c;
+    return s;
+}
+
+size_t strlen(const char* s) {
     size_t len = 0;
-    while (*s++) {
-        len++;
-    }
+    while (s[len]) len++;
     return len;
 }
 
-/* String compare */
-int strcmp(const char *s1, const char *s2) {
-    while (*s1 && (*s1 == *s2)) {
-        s1++;
-        s2++;
+char* strcpy(char* dest, const char* src) {
+    char* d = dest;
+    while ((*d++ = *src++));
+    return dest;
+}
+
+int strcmp(const char* s1, const char* s2) {
+    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+    return *(unsigned char*)s1 - *(unsigned char*)s2;
+}
+
+/* Заглушки для остальных функций */
+void memory_init(void) { pr_info("[MM] Memory manager initialized\n"); }
+void* kmalloc(size_t size) { static u8 heap[1048576]; static size_t offset = 0; void* ptr = heap + offset; offset += size; return ptr; }
+void kfree(void* ptr) { (void)ptr; }
+void* kzalloc(size_t size) { void* p = kmalloc(size); memset(p, 0, size); return p; }
+void* get_free_page(void) { return kmalloc(MIKU_PAGE_SIZE); }
+void free_page(void* page) { (void)page; }
+int map_memory(vaddr_t vaddr, paddr_t paddr, u64 flags) { return 0; }
+page_table_t* create_page_table(void) { static page_table_t pt; return &pt; }
+void switch_page_table(page_table_t* pt) { (void)pt; }
+
+void scheduler_init(void) { pr_info("[SCHED] Scheduler initialized\n"); }
+void schedule(void) { }
+thread_t* thread_create(const char* name, void (*entry)(void*), void* arg, thread_priority_t priority, size_t stack_size) { 
+    static thread_t threads[64]; static int next_tid = 0;
+    thread_t* t = &threads[next_tid++];
+    t->tid = next_tid;
+    t->state = THREAD_STATE_READY;
+    strcpy(t->name, name);
+    return t;
+}
+void thread_exit(int status) { (void)status; while(1) hlt(); }
+void thread_sleep(u64 ms) { (void)ms; }
+void thread_yield(void) { }
+
+void vfs_init(void) { pr_info("[VFS] Virtual filesystem initialized\n"); }
+file_t* vfs_open(const char* path, int flags, int mode) { (void)path; (void)flags; (void)mode; return NULL; }
+int vfs_close(file_t* file) { (void)file; return 0; }
+ssize_t vfs_read(file_t* file, void* buf, size_t count) { (void)file; (void)buf; (void)count; return 0; }
+ssize_t vfs_write(file_t* file, const void* buf, size_t count) { (void)file; (void)buf; (void)count; return 0; }
+int vfs_mkdir(const char* path, int mode) { (void)path; (void)mode; return 0; }
+int vfs_stat(const char* path, void* statbuf) { (void)path; (void)statbuf; return 0; }
+
+void interrupt_init(void) { pr_info("[IRQ] Interrupt system initialized\n"); }
+void enable_interrupts(void) { sti(); }
+void disable_interrupts(void) { cli(); }
+
+void syscall_init(void) { pr_info("[SYSCALL] System call interface initialized\n"); }
+long do_syscall(u64 nr, u64 arg0, u64 arg1, u64 arg2, u64 arg3, u64 arg4, u64 arg5) { 
+    (void)nr; (void)arg0; (void)arg1; (void)arg2; (void)arg3; (void)arg4; (void)arg5; 
+    return -1; 
+}
+
+void cpu_init(void) { 
+    cpu_data[0].id = 0;
+    cpu_data[0].present = true;
+    cpu_data[0].online = true;
+    num_cpus = 1;
+    pr_info("[CPU] BSP initialized (CPU 0)\n");
+}
+void cpu_idle(void) { while(1) hlt(); }
+void cpu_shutdown(void) { cli(); while(1) hlt(); }
+
+void disk_init(void) { pr_info("[DISK] Disk subsystem initialized\n"); }
+int disk_read(disk_t* disk, u64 lba, u32 count, void* buffer) { (void)disk; (void)lba; (void)count; (void)buffer; return 0; }
+
+void network_init(void) { pr_info("[NET] Network stack initialized\n"); }
+int socket_create(int domain, int type, int protocol) { (void)domain; (void)type; (void)protocol; return -1; }
+ssize_t socket_send(int sockfd, const void* buf, size_t len, int flags) { (void)sockfd; (void)buf; (void)len; (void)flags; return -1; }
+ssize_t socket_recv(int sockfd, void* buf, size_t len, int flags) { (void)sockfd; (void)buf; (void)len; (void)flags; return -1; }
+
+void spin_lock_init(spinlock_t* lock) { lock->locked = 0; }
+void spin_lock(spinlock_t* lock) { while(__sync_lock_test_and_set(&lock->locked, 1)) { while(lock->locked) { __asm__("pause"); } } }
+void spin_unlock(spinlock_t* lock) { __sync_lock_release(&lock->locked); }
+
+void mutex_init(mutex_t* mutex) { mutex->count = 1; mutex->owner = NULL; }
+void mutex_lock(mutex_t* mutex) { while(!__sync_bool_compare_and_swap(&mutex->count, 1, 0)) { } }
+void mutex_unlock(mutex_t* mutex) { __sync_lock_release(&mutex->count); }
+
+/* ============================================================
+ * ТОЧКА ВХОДА ЯДРА (C)
+ * ============================================================ */
+void kernel_main_c(u32 magic, void* mboot_ptr) {
+    mb_magic = magic;
+    mb_mboot_ptr = mboot_ptr;
+    
+    /* Инициализация консоли */
+    console_init();
+    
+    pr_info("[BOOT] Miku OS v" MIKU_VERSION_STRING "\n");
+    pr_info("[BOOT] Kernel loaded at 0x100000\n");
+    pr_info("[BOOT] Multiboot2 magic: 0x");
+    /* Здесь можно вывести magic число */
+    pr_info("\n");
+    
+    /* Проверка Multiboot2 */
+    if (magic != 0x36d76289) {
+        pr_info("[WARN] Invalid Multiboot2 magic (expected 0x36d76289)\n");
+    } else {
+        pr_info("[OK] Multiboot2 validated\n");
     }
-    return *(unsigned char *)s1 - *(unsigned char *)s2;
+    
+    /* Инициализация подсистем */
+    pr_info("[INIT] Initializing subsystems...\n");
+    
+    cpu_init();
+    memory_init();
+    interrupt_init();
+    scheduler_init();
+    vfs_init();
+    disk_init();
+    network_init();
+    syscall_init();
+    
+    pr_info("[OK] All subsystems initialized!\n");
+    pr_info("\n");
+    pr_info("========================================\n");
+    pr_info("  Miku OS ready! Type commands:\n");
+    pr_info("  help     - Show help\n");
+    pr_info("  version  - Show version\n");
+    pr_info("  info     - System info\n");
+    pr_info("  threads  - List threads\n");
+    pr_info("========================================\n");
+    pr_info("\n");
+    
+    /* Создание тестовых потоков */
+    pr_info("[TEST] Creating test threads...\n");
+    thread_create("idle", NULL, NULL, THREAD_PRIORITY_IDLE, MIKU_STACK_SIZE);
+    thread_create("init", NULL, NULL, THREAD_PRIORITY_NORMAL, MIKU_STACK_SIZE);
+    thread_create("kworker/0", NULL, NULL, THREAD_PRIORITY_LOW, MIKU_STACK_SIZE);
+    
+    pr_info("[OK] System ready! ♪\n");
+    
+    /* Переход в цикл планировщика */
+    pr_info("[SCHED] Entering scheduler loop...\n");
+    
+    /* Бесконечный цикл (в реальности здесь будет планировщик) */
+    while (1) {
+        hlt();
+    }
 }

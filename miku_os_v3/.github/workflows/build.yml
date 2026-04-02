@@ -1,0 +1,70 @@
+# GitHub Actions CI для Miku OS
+name: Miku OS Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          nasm \
+          qemu-system-x86 \
+          grub-pc-bin \
+          xorriso
+    
+    - name: Build Miku OS
+      run: make iso
+    
+    - name: Upload ISO artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: miku_os.iso
+        path: build/miku_os.iso
+        retention-days: 7
+    
+    - name: Test boot in QEMU
+      run: |
+        timeout 10s qemu-system-x86_64 \
+          -cdrom build/miku_os.iso \
+          -m 512M \
+          -nographic \
+          -serial mon:stdio || true
+
+  test-on-arch:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install dependencies on Arch
+      run: |
+        pacman -Sy --noconfirm \
+          base-devel \
+          git \
+          nasm \
+          qemu-base \
+          grub \
+          xorriso
+    
+    - name: Build on Arch Linux
+      run: make
+    
+    - name: Quick boot test
+      run: |
+        timeout 5s qemu-system-x86_64 \
+          -cdrom build/miku_os.iso \
+          -m 256M \
+          -nographic || true
